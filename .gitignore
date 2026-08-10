@@ -1,0 +1,10 @@
+# Personal config and runtime state live in ~/.config/koep and ~/.cache/koep,
+# never inside the repository. These entries are belt and braces.
+config.json
+seen.json
+*.log
+
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store

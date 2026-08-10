@@ -1,0 +1,19 @@
+{
+  "first_name": "Jane",
+  "last_name": "Doe",
+  "email": "jane@example.com",
+  "phone": "+32XXXXXXXXX",
+  "token": null,
+  "watch": [
+    {
+      "name": "saturday cut",
+      "service": "HEREN > BARBIER > SNIT > SNIT",
+      "person": "Robbe",
+      "within_days": 21,
+      "after": "14:00",
+      "before": null,
+      "weekday": "sat",
+      "enabled": true
+    }
+  ]
+}
