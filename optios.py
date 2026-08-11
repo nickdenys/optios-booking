@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Book, inspect and watch appointments at KÖP (Wetteren) via the Optios API.
+"""Book, inspect and watch appointments at any salon on the Optios platform.
 
 Stdlib only, no third-party dependencies. Every write action requires --confirm.
+Which salon a command acts on comes from the config, --salon, or OPTIOS_SALON.
 """
 
 from __future__ import annotations
@@ -18,19 +19,15 @@ import urllib.request
 from datetime import date, datetime, timedelta
 
 API = "https://client.optios.net/api/anonymous"
-ESTABLISHMENT_ID = "3600"
-ESTABLISHMENT_UUID = "907658a7-ec50-11e8-a545-0a4f0303a374"
 
-CONFIG_PATH = os.path.expanduser("~/.config/koep/config.json")
-CACHE_DIR = os.path.expanduser("~/.cache/koep")
-MENU_CACHE = os.path.join(CACHE_DIR, "menu.json")
-SEEN_PATH = os.path.join(CACHE_DIR, "seen.json")
+CONFIG_PATH = os.path.expanduser(os.environ.get("OPTIOS_CONFIG", "~/.config/optios/config.json"))
+CACHE_ROOT = os.path.expanduser("~/.cache/optios")
 MENU_TTL = 24 * 3600
 
 WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
 
-class KoepError(Exception):
+class OptiosError(Exception):
     """Any failure that should be reported to the caller rather than swallowed."""
 
 
@@ -46,7 +43,7 @@ def request(method, path, body=None, params=None):
     req.add_header("Accept", "application/json")
     req.add_header("Origin", "https://booking.optios.net")
     req.add_header("Referer", "https://booking.optios.net/")
-    req.add_header("User-Agent", "koep-cli/1.0")
+    req.add_header("User-Agent", "optios-cli/1.0")
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
@@ -54,15 +51,15 @@ def request(method, path, body=None, params=None):
             raw = resp.read().decode()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode()[:400]
-        raise KoepError(f"{method} {path} failed with HTTP {exc.code}: {detail}") from exc
+        raise OptiosError(f"{method} {path} failed with HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise KoepError(f"{method} {path} could not reach the server: {exc.reason}") from exc
+        raise OptiosError(f"{method} {path} could not reach the server: {exc.reason}") from exc
     if not raw:
         return None
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise KoepError(f"{method} {path} returned non-JSON: {raw[:200]}") from exc
+        raise OptiosError(f"{method} {path} returned non-JSON: {raw[:200]}") from exc
 
 
 # ---------------------------------------------------------------- config
@@ -70,12 +67,19 @@ def request(method, path, body=None, params=None):
 
 def load_config():
     if not os.path.exists(CONFIG_PATH):
-        raise KoepError(
-            f"No config at {CONFIG_PATH}. Run: koep.py init --first-name X --last-name Y "
+        raise OptiosError(
+            f"No config at {CONFIG_PATH}. Run: optios.py init --first-name X --last-name Y "
             "--email a@b.c --phone +32..."
         )
     with open(CONFIG_PATH) as handle:
-        return json.load(handle)
+        config = json.load(handle)
+    if "salons" not in config and ("watch" in config or "token" in config):
+        raise OptiosError(
+            f"{CONFIG_PATH} still uses the old single-salon layout. Move 'token' and 'watch' "
+            'under salons.<key>, give that salon an "id", and set "default_salon". '
+            "See config.example.json."
+        )
+    return config
 
 
 def save_config(config):
@@ -88,22 +92,117 @@ def save_config(config):
 def require_identity(config):
     missing = [k for k in ("first_name", "last_name", "email", "phone") if not config.get(k)]
     if missing:
-        raise KoepError(f"Config {CONFIG_PATH} is missing: {', '.join(missing)}")
+        raise OptiosError(f"Config {CONFIG_PATH} is missing: {', '.join(missing)}")
+
+
+# ---------------------------------------------------------------- salons
+
+
+class Salon:
+    """One establishment, plus the cache and watcher state that belong to it."""
+
+    def __init__(self, key, establishment_id, label=None, token=None, watch=None):
+        self.key = key
+        self.id = str(establishment_id)
+        self.label = label or key
+        self.token = token
+        self.watch = watch or []
+
+    @property
+    def cache_dir(self):
+        return os.path.join(CACHE_ROOT, self.key)
+
+    @property
+    def menu_cache(self):
+        return os.path.join(self.cache_dir, "menu.json")
+
+    @property
+    def seen_path(self):
+        return os.path.join(self.cache_dir, "seen.json")
+
+    @property
+    def log_path(self):
+        return os.path.join(self.cache_dir, "watch.log")
+
+    @property
+    def plist_label(self):
+        return f"net.optios.watch.{self.key}"
+
+    @property
+    def plist_path(self):
+        return os.path.expanduser(f"~/Library/LaunchAgents/{self.plist_label}.plist")
+
+    def __str__(self):
+        if self.label.endswith(self.id):
+            return self.label
+        return f"{self.label} (establishment {self.id})"
+
+
+def resolve_salon(config, wanted=None):
+    """Pick the salon to act on: --salon, then OPTIOS_SALON, then the configured default."""
+    salons = config.get("salons") or {}
+    wanted = wanted or os.environ.get("OPTIOS_SALON") or config.get("default_salon")
+
+    # A bare establishment id works without any config, for one-off lookups.
+    if wanted and wanted not in salons and str(wanted).isdigit():
+        return Salon(key=str(wanted), establishment_id=wanted, label=f"establishment {wanted}")
+
+    if not salons:
+        raise OptiosError(
+            f"No salons configured in {CONFIG_PATH}. Run: optios.py add-salon --key mysalon "
+            "--establishment 3600 --default"
+        )
+    if not wanted:
+        if len(salons) > 1:
+            raise OptiosError(
+                f"Several salons configured and no default. Pass --salon, or set "
+                f'"default_salon". Known: {", ".join(sorted(salons))}'
+            )
+        wanted = next(iter(salons))
+    if wanted not in salons:
+        raise OptiosError(f"Unknown salon {wanted!r}. Known: {', '.join(sorted(salons))}")
+
+    entry = salons[wanted] or {}
+    if not entry.get("id"):
+        raise OptiosError(f'Salon {wanted!r} has no "id" (the establishment id) in {CONFIG_PATH}.')
+    return Salon(
+        key=wanted,
+        establishment_id=entry["id"],
+        label=entry.get("label"),
+        token=entry.get("token"),
+        watch=entry.get("watch"),
+    )
+
+
+def select_salon(args):
+    """Load whatever config exists and resolve the salon this invocation targets."""
+    config = load_config() if os.path.exists(CONFIG_PATH) else {}
+    return config, resolve_salon(config, getattr(args, "salon", None))
+
+
+def save_token(config, salon, token):
+    """Persist a customer token against the salon it belongs to."""
+    entry = config.setdefault("salons", {}).setdefault(salon.key, {})
+    entry.setdefault("id", salon.id)
+    entry.setdefault("label", salon.label)
+    entry["token"] = token
+    save_config(config)
 
 
 # ---------------------------------------------------------------- menu
 
 
-def load_menu(refresh=False):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    fresh = os.path.exists(MENU_CACHE) and time.time() - os.path.getmtime(MENU_CACHE) < MENU_TTL
+def load_menu(salon, refresh=False):
+    os.makedirs(salon.cache_dir, exist_ok=True)
+    cache = salon.menu_cache
+    fresh = os.path.exists(cache) and time.time() - os.path.getmtime(cache) < MENU_TTL
     if fresh and not refresh:
-        with open(MENU_CACHE) as handle:
+        with open(cache) as handle:
             return json.load(handle)
-    menu = request("GET", "activity-menu", params={"establishment_id": ESTABLISHMENT_ID})
+    menu = request("GET", "activity-menu", params={"establishment_id": salon.id})
     if not isinstance(menu, list):
-        raise KoepError("activity-menu returned an unexpected shape; the API may have changed")
-    with open(MENU_CACHE, "w") as handle:
+        raise OptiosError("activity-menu returned an unexpected shape; the API may have changed")
+    with open(cache, "w") as handle:
         json.dump(menu, handle)
     return menu
 
@@ -144,7 +243,7 @@ def resolve_service(menu, query):
         for path, leaf in services:
             if str(leaf["id"]) == query:
                 return path, leaf
-        raise KoepError(f"No bookable service with menu id {query}")
+        raise OptiosError(f"No bookable service with menu id {query}")
 
     needle = query.lower().strip()
     exact = [(p, l) for p, l in services if p.lower() == needle or l["name"].strip().lower() == needle]
@@ -161,10 +260,10 @@ def resolve_service(menu, query):
     terms = [t for t in needle.replace(">", " ").split() if t]
     matches = [(p, l) for p, l in services if all(t in p.lower() for t in terms)]
     if not matches:
-        raise KoepError(f"No service matches {query!r}. Run: koep.py services")
+        raise OptiosError(f"No service matches {query!r}. Run: optios.py services")
     if len(matches) > 1:
         listing = "\n".join(f"  {p}  (id {l['id']})" for p, l in matches[:15])
-        raise KoepError(f"{query!r} is ambiguous, {len(matches)} matches:\n{listing}")
+        raise OptiosError(f"{query!r} is ambiguous, {len(matches)} matches:\n{listing}")
     return matches[0]
 
 
@@ -178,8 +277,8 @@ def blocks_for(leaf, person_id):
 # ---------------------------------------------------------------- persons
 
 
-def load_persons():
-    data = request("GET", "persons", params={"establishment_id": ESTABLISHMENT_ID})
+def load_persons(salon):
+    data = request("GET", "persons", params={"establishment_id": salon.id})
     people = data.get("data", data) if isinstance(data, dict) else data
     out = {}
     for person in people:
@@ -193,31 +292,31 @@ def load_persons():
     return out
 
 
-def resolve_person(name):
+def resolve_person(salon, name):
     if name is None:
         return None
     if str(name).lower() in ("any", "none", "geen", "geen voorkeur"):
         return None
-    persons = load_persons()
+    persons = load_persons(salon)
     if str(name).isdigit():
         return int(name)
     matches = [pid for pid, pname in persons.items() if name.lower() in pname.lower()]
     if not matches:
         listing = ", ".join(sorted(persons.values()))
-        raise KoepError(f"No stylist matches {name!r}. Known: {listing}")
+        raise OptiosError(f"No stylist matches {name!r}. Known: {listing}")
     if len(matches) > 1:
         listing = ", ".join(persons[p] for p in matches)
-        raise KoepError(f"{name!r} is ambiguous: {listing}")
+        raise OptiosError(f"{name!r} is ambiguous: {listing}")
     return matches[0]
 
 
 # ---------------------------------------------------------------- availability
 
 
-def find_slots(leaf, person_id, start, end, token=None):
+def find_slots(salon, leaf, person_id, start, end):
     """Query the free-moment finder week by week and return a flat, sorted slot list."""
-    customers = [{"token": token, "blocks": blocks_for(leaf, person_id)}]
-    payload = {"establishment_id": ESTABLISHMENT_ID, "customers": customers}
+    customers = [{"token": salon.token, "blocks": blocks_for(leaf, person_id)}]
+    payload = {"establishment_id": salon.id, "customers": customers}
 
     slots, names = [], {}
     cursor = start
@@ -278,7 +377,7 @@ def parse_weekdays(value):
     for part in value.split(","):
         part = part.strip().lower()[:3]
         if part not in WEEKDAYS:
-            raise KoepError(f"Unknown weekday {part!r}. Use mon,tue,wed,thu,fri,sat,sun")
+            raise OptiosError(f"Unknown weekday {part!r}. Use mon,tue,wed,thu,fri,sat,sun")
         days.add(WEEKDAYS[part])
     return days
 
@@ -289,29 +388,75 @@ def parse_date(value, default):
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError as exc:
-        raise KoepError(f"Bad date {value!r}, expected YYYY-MM-DD") from exc
+        raise OptiosError(f"Bad date {value!r}, expected YYYY-MM-DD") from exc
+
+
+# ---------------------------------------------------------------- setup commands
+
+
+def cmd_init(args):
+    config = load_config() if os.path.exists(CONFIG_PATH) else {}
+    for field in ("first_name", "last_name", "email", "phone"):
+        value = getattr(args, field)
+        if value:
+            config[field] = value
+    config.setdefault("salons", {})
+    config.setdefault("default_salon", None)
+    save_config(config)
+    require_identity(config)
+    print(f"Wrote {CONFIG_PATH}")
+    if not config["salons"]:
+        print("Next: optios.py add-salon --key mysalon --establishment 3600 --default")
+
+
+def cmd_add_salon(args):
+    config = load_config() if os.path.exists(CONFIG_PATH) else {}
+    salons = config.setdefault("salons", {})
+    entry = salons.setdefault(args.key, {})
+    entry["id"] = str(args.establishment)
+    if args.label:
+        entry["label"] = args.label
+    entry.setdefault("label", args.key)
+    entry.setdefault("token", None)
+    entry.setdefault("watch", [])
+    if args.default or not config.get("default_salon"):
+        config["default_salon"] = args.key
+    save_config(config)
+    print(f"Saved salon {args.key!r} (establishment {entry['id']}) to {CONFIG_PATH}")
+    if config["default_salon"] == args.key:
+        print(f"{args.key!r} is now the default salon.")
+
+
+def cmd_salons(args):
+    config = load_config()
+    salons = config.get("salons") or {}
+    if not salons:
+        print(f"No salons configured in {CONFIG_PATH}.")
+        return
+    if args.json:
+        print(json.dumps(config, indent=2, ensure_ascii=False))
+        return
+    default = config.get("default_salon")
+    width = max(len(k) for k in salons)
+    for key in sorted(salons):
+        entry = salons[key] or {}
+        mark = "*" if key == default else " "
+        rules = len(entry.get("watch") or [])
+        token = "token" if entry.get("token") else "no token"
+        print(
+            f" {mark} {key:<{width}}  id {str(entry.get('id')):<8}  "
+            f"{entry.get('label') or key}  ({rules} watch rule(s), {token})"
+        )
+    if default:
+        print("\n* = default. Override per command with --salon or OPTIOS_SALON.")
 
 
 # ---------------------------------------------------------------- commands
 
 
-def cmd_init(args):
-    config = {}
-    if os.path.exists(CONFIG_PATH):
-        config = load_config()
-    for field in ("first_name", "last_name", "email", "phone"):
-        value = getattr(args, field)
-        if value:
-            config[field] = value
-    config.setdefault("token", None)
-    config.setdefault("watch", [])
-    save_config(config)
-    require_identity(config)
-    print(f"Wrote {CONFIG_PATH}")
-
-
 def cmd_services(args):
-    menu = load_menu(refresh=args.refresh)
+    _, salon = select_salon(args)
+    menu = load_menu(salon, refresh=args.refresh)
     rows = []
     for path, leaf in iter_services(menu):
         if args.search and args.search.lower() not in path.lower():
@@ -337,20 +482,21 @@ def cmd_services(args):
 
 
 def cmd_slots(args):
-    config = load_config() if os.path.exists(CONFIG_PATH) else {}
-    menu = load_menu()
+    _, salon = select_salon(args)
+    menu = load_menu(salon)
     path, leaf = resolve_service(menu, args.service)
-    person_id = resolve_person(args.person)
+    person_id = resolve_person(salon, args.person)
     start = parse_date(args.since, date.today())
     end = parse_date(args.until, start + timedelta(days=args.days))
-    slots = find_slots(leaf, person_id, start, end, token=config.get("token"))
+    slots = find_slots(salon, leaf, person_id, start, end)
     slots = filter_slots(slots, args.after, args.before, parse_weekdays(args.weekday))
     if args.limit:
         slots = slots[: args.limit]
 
     if args.json:
-        print(json.dumps({"service": path, "slots": slots}, indent=2, ensure_ascii=False))
+        print(json.dumps({"salon": salon.key, "service": path, "slots": slots}, indent=2, ensure_ascii=False))
         return
+    print(f"{salon.label}")
     print(f"{path}  (EUR {service_price(leaf)}, {service_duration(leaf)} min)")
     print(f"{start} to {end}" + (f", stylist filter: {args.person}" if args.person else ""))
     if not slots:
@@ -365,7 +511,8 @@ def cmd_slots(args):
 
 
 def cmd_lastminutes(args):
-    data = request("GET", "last-minutes", params={"establishment_id": ESTABLISHMENT_ID})
+    _, salon = select_salon(args)
+    data = request("GET", "last-minutes", params={"establishment_id": salon.id})
     rows = []
     for item in data.get("data", []):
         attrs = item["attributes"]
@@ -397,28 +544,29 @@ def cmd_lastminutes(args):
 def cmd_book(args):
     config = load_config()
     require_identity(config)
-    menu = load_menu()
+    salon = resolve_salon(config, args.salon)
+    menu = load_menu(salon)
     path, leaf = resolve_service(menu, args.service)
-    person_id = resolve_person(args.person)
+    person_id = resolve_person(salon, args.person)
 
     try:
         moment = datetime.strptime(args.at, "%Y-%m-%d %H:%M")
     except ValueError as exc:
-        raise KoepError(f"Bad --at {args.at!r}, expected 'YYYY-MM-DD HH:MM'") from exc
+        raise OptiosError(f"Bad --at {args.at!r}, expected 'YYYY-MM-DD HH:MM'") from exc
 
     if not args.no_verify:
         day = moment.date()
-        available = find_slots(leaf, person_id, day, day, token=config.get("token"))
+        available = find_slots(salon, leaf, person_id, day, day)
         offered = {s["datetime"] for s in available}
         if args.at not in offered:
             nearby = ", ".join(sorted(s["time"] for s in available)) or "none"
-            raise KoepError(
+            raise OptiosError(
                 f"{args.at} is not offered for this service. Free that day: {nearby}\n"
                 "Re-run with --no-verify only if you are certain."
             )
 
     payload = {
-        "establishment_id": ESTABLISHMENT_ID,
+        "establishment_id": salon.id,
         "remark": args.remark or "",
         "date": moment.strftime("%Y-%m-%d %H:%M:%S"),
         "customer_data": {
@@ -430,7 +578,7 @@ def cmd_book(args):
             "street": None,
             "city": None,
             "zip": None,
-            "token": config.get("token"),
+            "token": salon.token,
         },
         "customers": [{"blocks": blocks_for(leaf, person_id)}],
         "giftcard_barcode": None,
@@ -438,6 +586,7 @@ def cmd_book(args):
     }
 
     print("Booking summary")
+    print(f"  salon     {salon}")
     print(f"  service   {path}")
     print(f"  when      {moment.strftime('%A %d %B %Y at %H:%M')}")
     print(f"  stylist   {args.person or 'no preference'}")
@@ -457,22 +606,22 @@ def cmd_book(args):
     print(json.dumps(result, indent=2, ensure_ascii=False)[:1500])
     if isinstance(result, dict):
         token = (result.get("customer") or {}).get("token") or result.get("token")
-        if token and not config.get("token"):
-            config["token"] = token
-            save_config(config)
-            print(f"\nSaved customer token to {CONFIG_PATH} (needed to list and cancel).")
+        if token and not salon.token:
+            save_token(config, salon, token)
+            print(f"\nSaved customer token for {salon.key!r} to {CONFIG_PATH}.")
 
 
 def cmd_appointments(args):
     config = load_config()
     require_identity(config)
+    salon = resolve_salon(config, args.salon)
     data = request(
         "GET",
         "calendar/appointments",
         params={
-            "establishment_id": ESTABLISHMENT_ID,
+            "establishment_id": salon.id,
             "email": config["email"],
-            "token": config.get("token") or "",
+            "token": salon.token or "",
         },
     )
     if args.json:
@@ -480,7 +629,7 @@ def cmd_appointments(args):
         return
     items = data.get("appointments", data) if isinstance(data, dict) else data
     if not items:
-        print("No appointments found for this email.")
+        print(f"No appointments found for this email at {salon.label}.")
         return
     for item in items:
         names = [b.get("activity", {}).get("name") for b in item.get("blocks") or []]
@@ -492,28 +641,33 @@ def cmd_appointments(args):
 
 def cmd_cancel(args):
     config = load_config()
-    print(f"Cancel appointment id={args.id} uuid={args.uuid}")
+    salon = resolve_salon(config, args.salon)
+    print(f"Cancel appointment id={args.id} uuid={args.uuid} at {salon}")
     if not args.confirm:
         print("DRY RUN. Nothing was sent. Re-run with --confirm to actually cancel.")
         return
     result = request(
         "DELETE",
         f"calendar/appointments/{args.id}/{args.uuid}",
-        body={"establishment_id": ESTABLISHMENT_ID},
+        body={"establishment_id": salon.id},
     )
     print("Cancelled.", json.dumps(result, ensure_ascii=False) if result else "")
 
 
 def cmd_watch(args):
     config = load_config()
-    rules = config.get("watch") or []
+    salon = resolve_salon(config, args.salon)
+    rules = salon.watch
     if not rules:
-        raise KoepError(f'No watch rules in {CONFIG_PATH}. Add a "watch" array.')
+        raise OptiosError(
+            f"No watch rules for salon {salon.key!r}. Add a \"watch\" array under "
+            f"salons.{salon.key} in {CONFIG_PATH}."
+        )
 
-    menu = load_menu()
+    menu = load_menu(salon)
     seen = {}
-    if os.path.exists(SEEN_PATH):
-        with open(SEEN_PATH) as handle:
+    if os.path.exists(salon.seen_path):
+        with open(salon.seen_path) as handle:
             seen = json.load(handle)
 
     announcements = []
@@ -522,10 +676,10 @@ def cmd_watch(args):
             continue
         name = rule.get("name") or rule["service"]
         path, leaf = resolve_service(menu, rule["service"])
-        person_id = resolve_person(rule.get("person"))
+        person_id = resolve_person(salon, rule.get("person"))
         start = date.today()
         end = start + timedelta(days=int(rule.get("within_days", 21)))
-        slots = find_slots(leaf, person_id, start, end, token=config.get("token"))
+        slots = find_slots(salon, leaf, person_id, start, end)
         slots = filter_slots(
             slots, rule.get("after"), rule.get("before"), parse_weekdays(rule.get("weekday"))
         )
@@ -536,17 +690,17 @@ def cmd_watch(args):
         if fresh and not args.prime:
             announcements.append((name, path, fresh))
 
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(SEEN_PATH, "w") as handle:
+    os.makedirs(salon.cache_dir, exist_ok=True)
+    with open(salon.seen_path, "w") as handle:
         json.dump(seen, handle, indent=2)
 
     if args.prime:
-        print(f"Primed baseline for {len(rules)} rule(s). Future runs report only new slots.")
+        print(f"Primed baseline for {len(rules)} rule(s) at {salon.label}.")
         return
 
     if not announcements:
         if not args.quiet:
-            print("No new slots.")
+            print(f"No new slots at {salon.label}.")
         return
 
     for name, path, fresh in announcements:
@@ -556,7 +710,7 @@ def cmd_watch(args):
         message = ", ".join(pretty) + (f" (+{len(fresh) - 4} more)" if len(fresh) > 4 else "")
         print(f"[{name}] {len(fresh)} new: {message}")
         if args.notify:
-            notify(f"KÖP: {name}", message)
+            notify(f"{salon.label}: {name}", message)
 
 
 def notify(title, message):
@@ -567,73 +721,195 @@ def notify(title, message):
     subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
 
 
-PLIST_LABEL = "net.optios.koep.watch"
-PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{PLIST_LABEL}.plist")
-
-
 def cmd_install_watcher(args):
+    config = load_config()
+    salon = resolve_salon(config, args.salon)
     script = os.path.abspath(__file__)
-    log = os.path.join(CACHE_DIR, "watch.log")
+    os.makedirs(salon.cache_dir, exist_ok=True)
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>{PLIST_LABEL}</string>
+  <key>Label</key><string>{salon.plist_label}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{sys.executable}</string>
     <string>{script}</string>
     <string>watch</string>
+    <string>--salon</string>
+    <string>{salon.key}</string>
     <string>--notify</string>
     <string>--quiet</string>
   </array>
   <key>StartInterval</key><integer>{args.interval}</integer>
   <key>RunAtLoad</key><false/>
-  <key>StandardOutPath</key><string>{log}</string>
-  <key>StandardErrorPath</key><string>{log}</string>
+  <key>StandardOutPath</key><string>{salon.log_path}</string>
+  <key>StandardErrorPath</key><string>{salon.log_path}</string>
 </dict>
 </plist>
 """
-    os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
-    with open(PLIST_PATH, "w") as handle:
+    os.makedirs(os.path.dirname(salon.plist_path), exist_ok=True)
+    with open(salon.plist_path, "w") as handle:
         handle.write(plist)
-    subprocess.run(["launchctl", "unload", PLIST_PATH], check=False, capture_output=True)
-    loaded = subprocess.run(["launchctl", "load", PLIST_PATH], check=False, capture_output=True)
+    subprocess.run(["launchctl", "unload", salon.plist_path], check=False, capture_output=True)
+    loaded = subprocess.run(
+        ["launchctl", "load", salon.plist_path], check=False, capture_output=True
+    )
     if loaded.returncode != 0:
-        raise KoepError(f"launchctl load failed: {loaded.stderr.decode().strip()}")
-    print(f"Installed {PLIST_PATH}, running every {args.interval}s.")
-    print(f"Logs: {log}")
-    print("Remove with: koep.py uninstall-watcher")
+        raise OptiosError(f"launchctl load failed: {loaded.stderr.decode().strip()}")
+    print(f"Installed {salon.plist_path}, watching {salon.label} every {args.interval}s.")
+    print(f"Logs: {salon.log_path}")
+    print(f"Remove with: optios.py uninstall-watcher --salon {salon.key}")
 
 
 def cmd_uninstall_watcher(args):
-    subprocess.run(["launchctl", "unload", PLIST_PATH], check=False, capture_output=True)
-    if os.path.exists(PLIST_PATH):
-        os.remove(PLIST_PATH)
-    print("Watcher removed.")
+    config = load_config()
+    salon = resolve_salon(config, args.salon)
+    subprocess.run(["launchctl", "unload", salon.plist_path], check=False, capture_output=True)
+    if os.path.exists(salon.plist_path):
+        os.remove(salon.plist_path)
+    print(f"Watcher for {salon.key!r} removed.")
+
+
+# ---------------------------------------------------------------- status
+
+
+def probe(name, check):
+    """Run one health check, capturing its outcome, latency and detail line."""
+    started = time.perf_counter()
+    try:
+        ok, message = True, check()
+    except OptiosError as exc:
+        ok, message = False, str(exc)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        ok, message = False, f"unexpected payload: {exc}"
+    return {
+        "check": name,
+        "ok": ok,
+        "ms": round((time.perf_counter() - started) * 1000),
+        "detail": message,
+    }
+
+
+def cmd_status(args):
+    """Check every endpoint the CLI depends on, and that its payload still parses."""
+    _, salon = select_salon(args)
+    state = {}
+
+    def check_menu():
+        menu = request("GET", "activity-menu", params={"establishment_id": salon.id})
+        if not isinstance(menu, list) or not menu:
+            raise OptiosError("expected a non-empty list of root categories")
+        services = list(iter_services(menu))
+        if not services:
+            raise OptiosError("no bookable leaves in the menu tree")
+        state["services"] = services
+        return f"{len(menu)} root categories, {len(services)} bookable services"
+
+    def check_persons():
+        persons = load_persons(salon)
+        if not persons:
+            raise OptiosError("no stylists returned")
+        return f"{len(persons)} stylists"
+
+    def check_last_minutes():
+        data = request("GET", "last-minutes", params={"establishment_id": salon.id})
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise OptiosError("expected an object with a 'data' list")
+        rows = data["data"]
+        free = [r for r in rows if not (r.get("attributes") or {}).get("is_booked")]
+        return f"{len(rows)} offers, {len(free)} open"
+
+    def check_finder():
+        if not state.get("services"):
+            raise OptiosError("skipped, the activity-menu check failed")
+        path, leaf = state["services"][0]
+        start = date.today()
+        end = start + timedelta(days=6)
+        data = request(
+            "POST",
+            f"calendar/free-moment-finder/{start.isoformat()}/{end.isoformat()}",
+            body={
+                "establishment_id": salon.id,
+                "customers": [{"token": None, "blocks": blocks_for(leaf, None)}],
+            },
+        )
+        # find_slots quietly skips a non-dict response, so assert the shape here instead.
+        if not isinstance(data, dict) or not isinstance(data.get("days"), dict):
+            raise OptiosError("expected an object with a 'days' map")
+        moments = sum(
+            len(bucket)
+            for day in data["days"].values()
+            for bucket in (day.get("free_moments") or {}).values()
+        )
+        return f"{moments} slots in 7 days for {path}"
+
+    results = [
+        probe("activity-menu", check_menu),
+        probe("persons", check_persons),
+        probe("last-minutes", check_last_minutes),
+        probe("free-moment-finder", check_finder),
+    ]
+    failed = [r for r in results if not r["ok"]]
+
+    if args.json:
+        report = {"ok": not failed, "api": API, "salon": salon.key, "establishment": salon.id}
+        report["checks"] = results
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"{API}\n{salon}\n")
+        for result in results:
+            mark = "ok  " if result["ok"] else "FAIL"
+            print(f"  {mark}  {result['check']:<20}{result['ms']:>6} ms  {result['detail']}")
+        print(f"\n{len(results) - len(failed)}/{len(results)} checks passed.")
+    if failed:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------- cli
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="koep.py", description=__doc__)
+    parser = argparse.ArgumentParser(prog="optios.py", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("init", help="write identity to the config file")
+    # Shared by every command that talks to a specific establishment.
+    salon_opt = argparse.ArgumentParser(add_help=False)
+    salon_opt.add_argument(
+        "--salon", help="configured salon key, or a bare establishment id for a one-off"
+    )
+
+    p = sub.add_parser("init", help="write your identity to the config file")
     p.add_argument("--first-name")
     p.add_argument("--last-name")
     p.add_argument("--email")
     p.add_argument("--phone")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("services", help="list bookable services")
+    p = sub.add_parser("add-salon", help="add or update a salon in the config")
+    p.add_argument("--key", required=True, help="short name you will pass to --salon")
+    p.add_argument("--establishment", required=True, help="establishment id, from the booking URL")
+    p.add_argument("--label", help="human readable name, shown in output")
+    p.add_argument("--default", action="store_true", help="make this the default salon")
+    p.set_defaults(func=cmd_add_salon)
+
+    p = sub.add_parser("salons", help="list configured salons")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_salons)
+
+    p = sub.add_parser(
+        "status", parents=[salon_opt], help="check the API is up and its payloads still parse"
+    )
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("services", parents=[salon_opt], help="list bookable services")
     p.add_argument("--search")
     p.add_argument("--refresh", action="store_true", help="bypass the 24h menu cache")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_services)
 
-    p = sub.add_parser("slots", help="find free slots for a service")
+    p = sub.add_parser("slots", parents=[salon_opt], help="find free slots for a service")
     p.add_argument("--service", required=True, help="menu path fragment or menu id")
     p.add_argument("--person", help="stylist name, or omit for no preference")
     p.add_argument("--since", help="YYYY-MM-DD, default today")
@@ -646,11 +922,13 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_slots)
 
-    p = sub.add_parser("lastminutes", help="list last-minute offers")
+    p = sub.add_parser("lastminutes", parents=[salon_opt], help="list last-minute offers")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_lastminutes)
 
-    p = sub.add_parser("book", help="book an appointment (dry run unless --confirm)")
+    p = sub.add_parser(
+        "book", parents=[salon_opt], help="book an appointment (dry run unless --confirm)"
+    )
     p.add_argument("--service", required=True)
     p.add_argument("--at", required=True, help="'YYYY-MM-DD HH:MM'")
     p.add_argument("--person")
@@ -659,27 +937,37 @@ def build_parser():
     p.add_argument("--confirm", action="store_true", help="actually send the booking")
     p.set_defaults(func=cmd_book)
 
-    p = sub.add_parser("appointments", help="list appointments for the configured email")
+    p = sub.add_parser(
+        "appointments", parents=[salon_opt], help="list appointments for the configured email"
+    )
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_appointments)
 
-    p = sub.add_parser("cancel", help="cancel an appointment (dry run unless --confirm)")
+    p = sub.add_parser(
+        "cancel", parents=[salon_opt], help="cancel an appointment (dry run unless --confirm)"
+    )
     p.add_argument("--id", required=True)
     p.add_argument("--uuid", required=True)
     p.add_argument("--confirm", action="store_true")
     p.set_defaults(func=cmd_cancel)
 
-    p = sub.add_parser("watch", help="report slots that are new since the last run")
+    p = sub.add_parser(
+        "watch", parents=[salon_opt], help="report slots that are new since the last run"
+    )
     p.add_argument("--notify", action="store_true", help="send a macOS notification")
     p.add_argument("--quiet", action="store_true", help="print nothing when there is no news")
     p.add_argument("--prime", action="store_true", help="record the baseline without reporting")
     p.set_defaults(func=cmd_watch)
 
-    p = sub.add_parser("install-watcher", help="install the LaunchAgent for periodic watching")
+    p = sub.add_parser(
+        "install-watcher", parents=[salon_opt], help="install a LaunchAgent for periodic watching"
+    )
     p.add_argument("--interval", type=int, default=1800, help="seconds between runs")
     p.set_defaults(func=cmd_install_watcher)
 
-    p = sub.add_parser("uninstall-watcher", help="remove the LaunchAgent")
+    p = sub.add_parser(
+        "uninstall-watcher", parents=[salon_opt], help="remove a salon's LaunchAgent"
+    )
     p.set_defaults(func=cmd_uninstall_watcher)
 
     return parser
@@ -689,7 +977,7 @@ def main():
     args = build_parser().parse_args()
     try:
         args.func(args)
-    except KoepError as exc:
+    except OptiosError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
