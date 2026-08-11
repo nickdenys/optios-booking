@@ -6,15 +6,15 @@
   "default_salon": "mysalon",
   "salons": {
     "mysalon": {
-      "id": "3600",
+      "id": "1234",
       "label": "My Salon, Sometown",
       "token": null,
-      "default_person": "Robbe",
+      "default_person": "Alex",
       "watch": [
         {
           "name": "saturday cut",
           "service": "HEREN > BARBIER > SNIT > SNIT",
-          "person": "Robbe",
+          "person": "Alex",
           "within_days": 21,
           "after": "14:00",
           "before": null,

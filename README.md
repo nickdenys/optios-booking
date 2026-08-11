@@ -8,7 +8,7 @@ services, find free slots, book, cancel, and watch for cancellations without ope
 a browser. Python 3 standard library only, no dependencies.
 
 Any salon on the platform works. You point the tool at one by its establishment id,
-which is the number in its booking URL (`booking.optios.net/3600/menu` is 3600).
+which is the number in its booking URL (`booking.optios.net/1234/menu` is 1234).
 
 ## Why
 
@@ -17,15 +17,15 @@ and a calendar. Finding out whether there is a Saturday afternoon slot in the ne
 three weeks takes a lot of clicking. This does it in one command.
 
 ```
-$ optios slots --service 2992137 --days 40 --weekday sat --after 14:00
+$ optios slots --service 1234567 --days 40 --weekday sat --after 14:00
 
-My Salon (establishment 3600)
+My Salon (establishment 1234)
 HEREN > BARBIER > SNIT > SNIT  (EUR 45, 30 min)
 2026-08-11 to 2026-09-20
 
-  Sat 12 Sep 2026  15:30   Megan Vanneste
-  Sat 19 Sep 2026  14:00   Robbe
-  Sat 19 Sep 2026  14:15   Megan Vanneste
+  Sat 12 Sep 2026  15:30   Sam
+  Sat 19 Sep 2026  14:00   Alex
+  Sat 19 Sep 2026  14:15   Sam
 ```
 
 ## Install
@@ -39,7 +39,7 @@ python3 ~/Code/optios-booking/optios.py init \
 
 # where you book, one entry per salon
 python3 ~/Code/optios-booking/optios.py add-salon \
-  --key mysalon --establishment 3600 --label "My Salon, Sometown" --default
+  --key mysalon --establishment 1234 --label "My Salon, Sometown" --default
 ```
 
 To use it as a Claude Code skill, symlink it into your skills directory:
@@ -62,15 +62,15 @@ repository, so personal details are never committed. See `config.example.json`.
   "default_salon": "mysalon",
   "salons": {
     "mysalon": {
-      "id": "3600",
+      "id": "1234",
       "label": "My Salon, Sometown",
       "token": null,
-      "default_person": "Robbe",
+      "default_person": "Alex",
       "watch": [
         {
           "name": "saturday cut",
           "service": "HEREN > BARBIER > SNIT > SNIT",
-          "person": "Robbe",
+          "person": "Alex",
           "within_days": 21,
           "after": "14:00",
           "weekday": "sat",
@@ -92,8 +92,8 @@ the customer token the API needs in order to list and cancel your appointments.
 ### Preferred stylist
 
 `default_person` is the stylist `slots` and `book` use when you do not pass
-`--person`. Set it with `add-salon --key mysalon --establishment 3600
---default-person Robbe`, and clear it again with `--default-person any`.
+`--person`. Set it with `add-salon --key mysalon --establishment 1234
+--default-person Alex`, and clear it again with `--default-person any`.
 
 An explicit `--person` always wins, and `--person any` searches every stylist for that
 one command. Watch rules inherit the default only when the rule has no `person` key;
@@ -112,7 +112,7 @@ Every command that talks to a salon accepts `--salon`. Resolution order:
 handy for looking at a salon you have not set up:
 
 ```bash
-optios slots --salon 4210 --service "snit"   # one-off, nothing written to config
+optios slots --salon 5678 --service "snit"   # one-off, nothing written to config
 optios salons                                # list what is configured
 ```
 
@@ -145,7 +145,7 @@ Before booking, the tool re-queries availability and refuses if the requested sl
 not actually on offer:
 
 ```
-$ optios book --service 2992137 --at "2026-08-18 12:00"
+$ optios book --service 1234567 --at "2026-08-18 12:00"
 error: 2026-08-18 12:00 is not offered for this service.
        Free that day: 15:30, 16:30, 17:00
 ```
@@ -205,7 +205,7 @@ check fails, so it works in a cron job or a pre-flight check.
 $ optios status
 
 https://client.optios.net/api/anonymous
-My Salon (establishment 3600)
+My Salon (establishment 1234)
 
   ok    activity-menu          637 ms  2 root categories, 50 bookable services
   ok    persons                537 ms  9 stylists

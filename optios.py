@@ -152,7 +152,7 @@ def resolve_salon(config, wanted=None):
     if not salons:
         raise OptiosError(
             f"No salons configured in {CONFIG_PATH}. Run: optios.py add-salon --key mysalon "
-            "--establishment 3600 --default"
+            "--establishment 1234 --default"
         )
     if not wanted:
         if len(salons) > 1:
@@ -420,7 +420,7 @@ def cmd_init(args):
     require_identity(config)
     print(f"Wrote {CONFIG_PATH}")
     if not config["salons"]:
-        print("Next: optios.py add-salon --key mysalon --establishment 3600 --default")
+        print("Next: optios.py add-salon --key mysalon --establishment 1234 --default")
 
 
 def cmd_add_salon(args):

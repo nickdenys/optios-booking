@@ -48,7 +48,7 @@ optios.py status [--salon KEY] [--json]
 optios.py services [--salon KEY] [--search barbier] [--json]
 
 # Free slots. --service takes a menu path fragment or a numeric menu id.
-optios.py slots --service "BARBIER > SNIT > SNIT" [--salon KEY] [--person Robbe] \
+optios.py slots --service "BARBIER > SNIT > SNIT" [--salon KEY] [--person Alex] \
                 [--since 2026-09-01] [--until 2026-09-30] [--days 21] \
                 [--after 16:00] [--before 19:00] [--weekday sat,fri] [--limit 10] [--json]
 
@@ -56,8 +56,8 @@ optios.py slots --service "BARBIER > SNIT > SNIT" [--salon KEY] [--person Robbe]
 optios.py lastminutes [--salon KEY] [--json]
 
 # Book. Prints a summary and stops unless --confirm is given.
-optios.py book --service 2992137 --at "2026-08-18 15:30" [--salon KEY] \
-               [--person Robbe] [--remark "..."] [--confirm]
+optios.py book --service 1234567 --at "2026-08-18 15:30" [--salon KEY] \
+               [--person Alex] [--remark "..."] [--confirm]
 
 # Existing appointments for the configured email
 optios.py appointments [--salon KEY] [--json]
@@ -72,7 +72,7 @@ optios.py uninstall-watcher [--salon KEY]
 
 # Setup
 optios.py init --first-name X --last-name Y --email a@b.c --phone +32...
-optios.py add-salon --key mysalon --establishment 3600 --label "My Salon" --default
+optios.py add-salon --key mysalon --establishment 1234 --label "My Salon" --default
 ```
 
 ## Preferred stylist
@@ -99,7 +99,7 @@ Edit the `watch` array under the salon's entry in `~/.config/optios/config.json`
 
 ```json
 {"name": "saturday cut", "service": "HEREN > BARBIER > SNIT > SNIT",
- "person": "Robbe", "within_days": 21, "after": "14:00", "weekday": "sat",
+ "person": "Alex", "within_days": 21, "after": "14:00", "weekday": "sat",
  "enabled": true}
 ```
 
