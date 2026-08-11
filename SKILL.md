@@ -75,6 +75,13 @@ optios.py init --first-name X --last-name Y --email a@b.c --phone +32...
 optios.py add-salon --key mysalon --establishment 3600 --label "My Salon" --default
 ```
 
+## Preferred stylist
+
+A salon can set `default_person`, which `slots` and `book` use when `--person` is
+absent. Output says "(salon default)" when it is applied. Pass `--person NAME` to
+override it, or `--person any` to search every stylist. Do not pass `--person` at all
+just to restate the default.
+
 ## Service names
 
 Services are a menu tree, so `--service` matches on the path. A trailing fragment is

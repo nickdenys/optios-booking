@@ -9,6 +9,7 @@
       "id": "3600",
       "label": "My Salon, Sometown",
       "token": null,
+      "default_person": "Robbe",
       "watch": [
         {
           "name": "saturday cut",

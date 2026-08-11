@@ -101,12 +101,14 @@ def require_identity(config):
 class Salon:
     """One establishment, plus the cache and watcher state that belong to it."""
 
-    def __init__(self, key, establishment_id, label=None, token=None, watch=None):
+    def __init__(self, key, establishment_id, label=None, token=None, watch=None,
+                 default_person=None):
         self.key = key
         self.id = str(establishment_id)
         self.label = label or key
         self.token = token
         self.watch = watch or []
+        self.default_person = default_person
 
     @property
     def cache_dir(self):
@@ -171,6 +173,7 @@ def resolve_salon(config, wanted=None):
         label=entry.get("label"),
         token=entry.get("token"),
         watch=entry.get("watch"),
+        default_person=entry.get("default_person"),
     )
 
 
@@ -310,6 +313,17 @@ def resolve_person(salon, name):
     return matches[0]
 
 
+def preferred_person(salon, requested):
+    """The stylist to use: an explicit request, else the salon's default.
+
+    Returns (name, came_from_default) so callers can say which one they applied.
+    Pass --person any to ignore the default and search every stylist.
+    """
+    if requested is not None:
+        return requested, False
+    return salon.default_person, salon.default_person is not None
+
+
 # ---------------------------------------------------------------- availability
 
 
@@ -416,8 +430,11 @@ def cmd_add_salon(args):
     entry["id"] = str(args.establishment)
     if args.label:
         entry["label"] = args.label
+    if args.default_person:
+        entry["default_person"] = None if args.default_person.lower() == "any" else args.default_person
     entry.setdefault("label", args.key)
     entry.setdefault("token", None)
+    entry.setdefault("default_person", None)
     entry.setdefault("watch", [])
     if args.default or not config.get("default_salon"):
         config["default_salon"] = args.key
@@ -443,9 +460,10 @@ def cmd_salons(args):
         mark = "*" if key == default else " "
         rules = len(entry.get("watch") or [])
         token = "token" if entry.get("token") else "no token"
+        stylist = entry.get("default_person") or "any stylist"
         print(
             f" {mark} {key:<{width}}  id {str(entry.get('id')):<8}  "
-            f"{entry.get('label') or key}  ({rules} watch rule(s), {token})"
+            f"{entry.get('label') or key}  ({stylist}, {rules} watch rule(s), {token})"
         )
     if default:
         print("\n* = default. Override per command with --salon or OPTIOS_SALON.")
@@ -485,7 +503,8 @@ def cmd_slots(args):
     _, salon = select_salon(args)
     menu = load_menu(salon)
     path, leaf = resolve_service(menu, args.service)
-    person_id = resolve_person(salon, args.person)
+    person, from_default = preferred_person(salon, args.person)
+    person_id = resolve_person(salon, person)
     start = parse_date(args.since, date.today())
     end = parse_date(args.until, start + timedelta(days=args.days))
     slots = find_slots(salon, leaf, person_id, start, end)
@@ -498,7 +517,10 @@ def cmd_slots(args):
         return
     print(f"{salon.label}")
     print(f"{path}  (EUR {service_price(leaf)}, {service_duration(leaf)} min)")
-    print(f"{start} to {end}" + (f", stylist filter: {args.person}" if args.person else ""))
+    stylist = ""
+    if person:
+        stylist = f", stylist filter: {person}" + (" (salon default)" if from_default else "")
+    print(f"{start} to {end}{stylist}")
     if not slots:
         print("\nNo free slots in that window.")
         return
@@ -547,7 +569,8 @@ def cmd_book(args):
     salon = resolve_salon(config, args.salon)
     menu = load_menu(salon)
     path, leaf = resolve_service(menu, args.service)
-    person_id = resolve_person(salon, args.person)
+    person, from_default = preferred_person(salon, args.person)
+    person_id = resolve_person(salon, person)
 
     try:
         moment = datetime.strptime(args.at, "%Y-%m-%d %H:%M")
@@ -589,7 +612,10 @@ def cmd_book(args):
     print(f"  salon     {salon}")
     print(f"  service   {path}")
     print(f"  when      {moment.strftime('%A %d %B %Y at %H:%M')}")
-    print(f"  stylist   {args.person or 'no preference'}")
+    print(
+        f"  stylist   {person or 'no preference'}"
+        + (" (salon default)" if from_default else "")
+    )
     print(f"  price     EUR {service_price(leaf)}  ({service_duration(leaf)} min)")
     print(f"  name      {config['first_name']} {config['last_name']}")
     print(f"  email     {config['email']}")
@@ -629,14 +655,35 @@ def cmd_appointments(args):
         return
     items = data.get("appointments", data) if isinstance(data, dict) else data
     if not items:
-        print(f"No appointments found for this email at {salon.label}.")
+        if not salon.token:
+            # The API answers 200 [] to any request without a token, even one with no
+            # email at all, so an empty list here says nothing either way.
+            print(
+                f"Nothing returned for {salon.label}, but no customer token is set for "
+                f"this salon. Without one the API returns an empty list for every "
+                f"request, so this means unknown, not none."
+            )
+        else:
+            print(f"No appointments found for this email at {salon.label}.")
         return
     for item in items:
-        names = [b.get("activity", {}).get("name") for b in item.get("blocks") or []]
-        print(
-            f"  id={item.get('id')} uuid={item.get('uuid')}  {item.get('starts_at')}  "
-            + ", ".join(filter(None, names))
+        names, persons = [], []
+        for activity in item.get("appointment_activities") or []:
+            names.append(activity.get("name"))
+            for person in activity.get("persons") or []:
+                persons.append(
+                    " ".join(filter(None, [person.get("first_name"), person.get("last_name")]))
+                )
+        names = [n for n in names if n] or list(item.get("activities") or [])
+        when = item.get("date")
+        stamp = (
+            datetime.strptime(when, "%Y-%m-%d %H:%M:%S").strftime("%a %d %b %Y  %H:%M")
+            if when
+            else "date unknown"
         )
+        who = ", ".join(sorted({p for p in persons if p})) or "no preference"
+        print(f"  {stamp}   {', '.join(names) or 'unknown service'}   {who}")
+        print(f"    id={item.get('id')}  uuid={item.get('uuid')}   (pass both to cancel)")
 
 
 def cmd_cancel(args):
@@ -676,7 +723,8 @@ def cmd_watch(args):
             continue
         name = rule.get("name") or rule["service"]
         path, leaf = resolve_service(menu, rule["service"])
-        person_id = resolve_person(salon, rule.get("person"))
+        # A rule with no "person" key inherits the salon default; an explicit null means any.
+        person_id = resolve_person(salon, rule.get("person", salon.default_person))
         start = date.today()
         end = start + timedelta(days=int(rule.get("within_days", 21)))
         slots = find_slots(salon, leaf, person_id, start, end)
@@ -890,6 +938,9 @@ def build_parser():
     p.add_argument("--key", required=True, help="short name you will pass to --salon")
     p.add_argument("--establishment", required=True, help="establishment id, from the booking URL")
     p.add_argument("--label", help="human readable name, shown in output")
+    p.add_argument(
+        "--default-person", help='preferred stylist for this salon, or "any" to clear it'
+    )
     p.add_argument("--default", action="store_true", help="make this the default salon")
     p.set_defaults(func=cmd_add_salon)
 

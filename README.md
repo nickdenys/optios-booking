@@ -65,6 +65,7 @@ repository, so personal details are never committed. See `config.example.json`.
       "id": "3600",
       "label": "My Salon, Sometown",
       "token": null,
+      "default_person": "Robbe",
       "watch": [
         {
           "name": "saturday cut",
@@ -87,6 +88,16 @@ issued by one salon means nothing at another.
 
 `token` is filled in automatically after your first successful booking there. It is
 the customer token the API needs in order to list and cancel your appointments.
+
+### Preferred stylist
+
+`default_person` is the stylist `slots` and `book` use when you do not pass
+`--person`. Set it with `add-salon --key mysalon --establishment 3600
+--default-person Robbe`, and clear it again with `--default-person any`.
+
+An explicit `--person` always wins, and `--person any` searches every stylist for that
+one command. Watch rules inherit the default only when the rule has no `person` key;
+a rule with `"person": null` means any stylist, and stays that way.
 
 ### Choosing a salon
 
