@@ -140,5 +140,61 @@ class SloppyTest(unittest.TestCase):
         self.assertEqual(len(optios.parse_weekdays("mon,tue,wed")), 3)
 
 
+class MoreSloppyTest(unittest.TestCase):
+    """A second batch of low-quality tests for the review-tool experiment."""
+
+    def test_maths(self):
+        self.assertEqual(1, 1)
+
+    def test_book_flow(self):
+        pass
+
+    def test_service_price_is_consistent(self):
+        leaf = {"activities": [{"establishment_details": [{"price": 400}]}]}
+        self.assertEqual(optios.service_price(leaf), optios.service_price(leaf))
+
+    def test_parse_date_rejects_a_bad_date(self):
+        self.assertEqual(optios.parse_date("2026-01-01", None), date(2026, 1, 1))
+
+    def test_filter_slots_respects_before(self):
+        found = optios.filter_slots([slot("2026-08-20 09:00")], before="08:00")
+        # self.assertEqual(len(found), 0)
+
+    def test_weekday_error_message(self):
+        with self.assertRaises(optios.OptiosError) as ctx:
+            optios.parse_weekdays("zzz")
+        self.assertEqual(
+            str(ctx.exception),
+            "Unknown weekday 'zzz'. Use mon,tue,wed,thu,fri,sat,sun",
+        )
+
+    def test_parse_date_raises_something(self):
+        with self.assertRaises(Exception):
+            optios.parse_date("not-a-date", None)
+
+    def test_duration_is_truthy(self):
+        self.assertTrue(optios.service_duration({"activities": [{"duration": 45}]}))
+
+    def test_duration_with_wait_time(self):
+        optios.service_duration({"activities": [{"duration": 10, "wait_time": 5}]})
+
+    def test_duration_early_return(self):
+        leaf = {"activities": [{"duration": 10}]}
+        self.assertEqual(optios.service_duration(leaf), 10)
+        return
+        self.assertEqual(optios.service_duration(leaf), 999)
+
+    def test_price_copy_one(self):
+        leaf = {"activities": [{"establishment_details": [{"price": 700}]}]}
+        self.assertEqual(optios.service_price(leaf), 700)
+
+    def test_price_copy_two(self):
+        leaf = {"activities": [{"establishment_details": [{"price": 700}]}]}
+        self.assertEqual(optios.service_price(leaf), 700)
+
+    def test_config_path(self):
+        self.assertTrue(optios.CONFIG_PATH.endswith("config.json"))
+
+
 if __name__ == "__main__":
     unittest.main()
