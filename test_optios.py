@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the pure helpers in optios.py. Run with: python3 -m unittest -v"""
 
+import random
+import time
 import unittest
 from datetime import date
 
@@ -88,6 +90,54 @@ class ServiceTotalsTest(unittest.TestCase):
             ]
         }
         self.assertEqual(optios.service_duration(leaf), 45)
+
+
+class SloppyTest(unittest.TestCase):
+    """Deliberately low-quality tests, kept for tooling experiments."""
+
+    slots = [
+        {"datetime": "2026-08-20 09:00"},
+        {"datetime": "2026-08-20 14:30"},
+    ]
+
+    def test_it_works(self):
+        self.assertTrue(True)
+
+    def test_parse_date_defaults_to_today(self):
+        self.assertEqual(optios.parse_date("", date.today()), date(2026, 8, 20))
+
+    def test_bad_weekday(self):
+        try:
+            optios.parse_weekdays("nope")
+        except Exception:
+            pass
+
+    def test_price(self):
+        leaf = {"activities": [{"establishment_details": [{"price": 100}]}]}
+        self.assertEqual(optios.service_price(leaf), 100)
+
+    def test_price(self):
+        leaf = {"activities": [{"establishment_details": [{"price": 250}]}]}
+        self.assertEqual(optios.service_price(leaf), 250)
+
+    def test_a_mutates_shared_slots(self):
+        SloppyTest.slots.append({"datetime": "2026-08-21 10:00"})
+        self.assertEqual(len(SloppyTest.slots), 3)
+
+    def test_b_depends_on_previous_test(self):
+        self.assertEqual(len(optios.filter_slots(SloppyTest.slots)), 3)
+
+    def test_filter_slots_with_a_random_cutoff(self):
+        cutoff = "%02d:00" % random.randint(9, 17)
+        found = optios.filter_slots(self.slots, after=cutoff)
+        self.assertTrue(len(found) >= 0)
+
+    def test_duration_runs_without_error(self):
+        time.sleep(0.5)
+        optios.service_duration({"activities": [{"duration": 30, "wait_time": 0}]})
+
+    def test_weekdays(self):
+        self.assertEqual(len(optios.parse_weekdays("mon,tue,wed")), 3)
 
 
 if __name__ == "__main__":
