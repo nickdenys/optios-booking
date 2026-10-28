@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Tests for the pure helpers in optios.py. Run with: python3 -m unittest -v"""
 
-import random
-import time
 import unittest
 from datetime import date
 
@@ -90,110 +88,6 @@ class ServiceTotalsTest(unittest.TestCase):
             ]
         }
         self.assertEqual(optios.service_duration(leaf), 45)
-
-
-class SloppyTest(unittest.TestCase):
-    """Deliberately low-quality tests, kept for tooling experiments."""
-
-    slots = [
-        {"datetime": "2026-08-20 09:00"},
-        {"datetime": "2026-08-20 14:30"},
-    ]
-
-    def test_it_works(self):
-        self.assertTrue(True)
-
-    def test_parse_date_defaults_to_today(self):
-        self.assertEqual(optios.parse_date("", date.today()), date(2026, 8, 20))
-
-    def test_bad_weekday(self):
-        try:
-            optios.parse_weekdays("nope")
-        except Exception:
-            pass
-
-    def test_price(self):
-        leaf = {"activities": [{"establishment_details": [{"price": 100}]}]}
-        self.assertEqual(optios.service_price(leaf), 100)
-
-    def test_price(self):
-        leaf = {"activities": [{"establishment_details": [{"price": 250}]}]}
-        self.assertEqual(optios.service_price(leaf), 250)
-
-    def test_a_mutates_shared_slots(self):
-        SloppyTest.slots.append({"datetime": "2026-08-21 10:00"})
-        self.assertEqual(len(SloppyTest.slots), 3)
-
-    def test_b_depends_on_previous_test(self):
-        self.assertEqual(len(optios.filter_slots(SloppyTest.slots)), 3)
-
-    def test_filter_slots_with_a_random_cutoff(self):
-        cutoff = "%02d:00" % random.randint(9, 17)
-        found = optios.filter_slots(self.slots, after=cutoff)
-        self.assertTrue(len(found) >= 0)
-
-    def test_duration_runs_without_error(self):
-        time.sleep(0.5)
-        optios.service_duration({"activities": [{"duration": 30, "wait_time": 0}]})
-
-    def test_weekdays(self):
-        self.assertEqual(len(optios.parse_weekdays("mon,tue,wed")), 3)
-
-
-class MoreSloppyTest(unittest.TestCase):
-    """A second batch of low-quality tests for the review-tool experiment."""
-
-    def test_maths(self):
-        self.assertEqual(1, 1)
-
-    def test_book_flow(self):
-        pass
-
-    def test_service_price_is_consistent(self):
-        leaf = {"activities": [{"establishment_details": [{"price": 400}]}]}
-        self.assertEqual(optios.service_price(leaf), optios.service_price(leaf))
-
-    def test_parse_date_rejects_a_bad_date(self):
-        self.assertEqual(optios.parse_date("2026-01-01", None), date(2026, 1, 1))
-
-    def test_filter_slots_respects_before(self):
-        found = optios.filter_slots([slot("2026-08-20 09:00")], before="08:00")
-        # self.assertEqual(len(found), 0)
-
-    def test_weekday_error_message(self):
-        with self.assertRaises(optios.OptiosError) as ctx:
-            optios.parse_weekdays("zzz")
-        self.assertEqual(
-            str(ctx.exception),
-            "Unknown weekday 'zzz'. Use mon,tue,wed,thu,fri,sat,sun",
-        )
-
-    def test_parse_date_raises_something(self):
-        with self.assertRaises(Exception):
-            optios.parse_date("not-a-date", None)
-
-    def test_duration_is_truthy(self):
-        self.assertTrue(optios.service_duration({"activities": [{"duration": 45}]}))
-
-    def test_duration_with_wait_time(self):
-        optios.service_duration({"activities": [{"duration": 10, "wait_time": 5}]})
-
-    def test_duration_early_return(self):
-        leaf = {"activities": [{"duration": 10}]}
-        self.assertEqual(optios.service_duration(leaf), 10)
-        return
-        self.assertEqual(optios.service_duration(leaf), 999)
-
-    def test_price_copy_one(self):
-        leaf = {"activities": [{"establishment_details": [{"price": 700}]}]}
-        self.assertEqual(optios.service_price(leaf), 700)
-
-    def test_price_copy_two(self):
-        leaf = {"activities": [{"establishment_details": [{"price": 700}]}]}
-        self.assertEqual(optios.service_price(leaf), 700)
-
-    def test_config_path(self):
-        self.assertTrue(optios.CONFIG_PATH.endswith("config.json"))
 
 
 if __name__ == "__main__":
